@@ -173,7 +173,9 @@ sub callback {
                 } elsif ($command eq 'del') {
                     remove_app($receive, $body);
                 } elsif ($command eq 'send') {
-                    send_callback($receive, split(/\s+/, $body));
+                    my($appname, $text) = $body =~ /\A([^\s])\s+(.*)\z/;
+                    $text //= '';
+                    send_callback($receive, $appname, $body);
                 }
             } elsif ($command_line eq 'list') {
                 send_applist($receive);
