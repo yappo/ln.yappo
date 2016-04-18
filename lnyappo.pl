@@ -256,7 +256,7 @@ sub send_applist {
     my $i = 0;
     for my $row (@{ $rows }) {
         $body .= sprintf("%03d. %s\napi_token: %s", ++$i, $row->{api_app}, $row->{api_token});
-        $body .= "\n    callback url: " . $row->{url} if $row->{url};
+        $body .= "\n    callback url: " . $row->{url} . "\n" if $row->{url};
     }
     if (@{ $rows} == 0) {
         $body .= "Your app is not registered.";
