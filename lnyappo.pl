@@ -2,12 +2,12 @@ use strict;
 use warnings;
 
 use DBI;
-use Digest::SHA 'hmac_sha256_base64';
 use Encode;
 use Furl;
-use JSON::PP;
+use JSON::XS;
 use Plack::Request;
 use String::Random;
+use LINE::Bot::API;
 
 my $dbh = DBI->connect('dbi:SQLite:dbname=lnyappo.db', '', '');
 my $string_gen = String::Random->new;
@@ -15,22 +15,21 @@ my $furl = Furl->new( agent => 'LiNe Yappo/1.00' );
 
 my $registration_secret = $ENV{LNYAPPO_REGISTRATION_SECRET}; # この LINE Bot は、ここで設定した文字列を受け付けると、ユーザの登録を行います
 
-my $channel_id     = $ENV{LINE_CHANNEL_ID};
-my $channel_secret = $ENV{LINE_CHANNEL_SECRET};
-my $bot_mid        = $ENV{LINE_BOT_MID};
-
-my $line_bot_api_endpoint = 'https://trialbot-api.line.me/v1/events';
+my $bot = LINE::Bot::API->new(
+    channel_id     => $ENV{LINE_CHANNEL_ID},
+    channel_secret => $ENV{LINE_CHANNEL_SECRET},
+    channel_mid    => $ENV{LINE_BOT_MID},
+);
 
 sub {
-    my $env = shift;
-    my $req = Plack::Request->new($env);
+    my $req = Plack::Request->new(shift);
 
     my $res = $req->new_response(200);
 
     if ($req->method eq 'POST') {
         if ($req->path eq '/linebot/callback') {
-            if (signature_validation($req)) {
-                callback($req);
+            if ($bot->signature_validation($req->content, $req->header('X-LINE-ChannelSignature'))) {
+                callback($bot->create_receives_from_json($req->content));
             }
         } elsif ($req->path eq '/send') {
             do_send($req, $res);
@@ -121,9 +120,12 @@ sub do_send {
         return;
     }
 
-    my $line_res = send_text($activate_mid->{mid}, decode( utf8 => "from: $appname\n$message" ));
+    my $line_res = $bot->send_text(
+        to_mid => $activate_mid->{mid},
+        text   => decode( utf8 => "from: $appname\n$message" ),
+    );
     $res->header( 'Content-Type' => $line_res->header('Content-Type') );
-    $res->body($line_res->content);
+    $res->body(json_encode($line_res));
 }
 
 sub do_add_callback {
@@ -145,29 +147,21 @@ sub do_add_callback {
     }
 
     save_callback_url($activate_mid->{id}, $url);
-    my $line_res = send_text($activate_mid->{mid}, sprintf("'%s' app's callback url was registered by Web app.\nurl is '%s'", $appname, $url));
+    my $line_res = $bot->send_text(
+        to_mid => $activate_mid->{mid},
+        text   => sprintf("'%s' app's callback url was registered by Web app.\nurl is '%s'", $appname, $url),
+    );
     $res->header( 'Content-Type' => $line_res->header('Content-Type') );
     $res->body('{"status":200,"message":"Succeed."}');
 }
 
-
-sub signature_validation {
-    my $req = shift;
-    my $json = $req->content or return;
-    my $signature = $req->header('X-LINE-ChannelSignature');
-    $signature =~ s/=+\z//;
-    $signature eq hmac_sha256_base64($json, $channel_secret);
-}
-
 sub callback {
-    my $req = shift;
-    my $json = $req->content or return;
+    my $receives = shift;
 
-    my $data = decode_json $json;
-    for my $message (@{ $data->{result} }) {
-        next unless validation_message($message);
+    for my $receive (@{ $receives }) {
+        next unless $receive->is_message && $receive->is_text;
 
-        my $text = $message->{content}{text};
+        my $text = $receive->text;
         if ($text =~ /\A$registration_secret\s+(.+)\z/) {
             my $command_line = $1;
             warn "COMMAND LINE: $command_line";
@@ -175,70 +169,61 @@ sub callback {
                 my($command, $body) = ($1, $2);
                 warn "COMMAND: $command BODY: $body";
                 if ($command eq 'add') {
-                    registration_app($message, $text, $body);
+                    registration_app($receive, $text, $body);
                 } elsif ($command eq 'del') {
-                    remove_app($message, $body);
+                    remove_app($receive, $body);
                 } elsif ($command eq 'send') {
-                    send_callback($message, split(/\s+/, $body));
+                    send_callback($receive, split(/\s+/, $body));
                 }
             } elsif ($command_line eq 'list') {
-                send_applist($message);
+                send_applist($receive);
             } elsif ($command_line eq 'help') {
-                send_help($message);
+                send_help($receive);
             }
         }
     }
 }
 
-sub validation_message {
-    my $message = shift;
-    return unless $message->{eventType}            eq '138311609000106303';
-    return unless $message->{fromChannel}          eq '1341301815';
-    return unless $message->{toChannel}            eq $channel_id;
-    return unless $message->{content}{toType}      == 1;
-    return unless $message->{content}{contentType} == 1;
-    my $sent_me = 0;
-    for my $mid (@{ $message->{content}{to} }) {
-        $sent_me++ if $mid eq $bot_mid;
-    }
-    return unless $sent_me;
-    return 1;
-}
-
 sub registration_app {
-    my($message, $used_secret, $appname) = @_;
-    my $mid = $message->{content}{from};
+    my($receive, $used_secret, $appname) = @_;
+    my $mid = $receive->from_mid;
 
     my $activate_mid = get_activate_mid_by_mid($mid, $appname);
     if ($activate_mid) {
-        send_text($mid, sprintf("You are registered.\nYour '%s' app's api_token is '%s'.", $activate_mid->{api_app}, $activate_mid->{api_token}));
+        $bot->send_text(
+            to_mid => $mid,
+            text   => sprintf("You are registered.\nYour '%s' app's api_token is '%s'.", $activate_mid->{api_app}, $activate_mid->{api_token}),
+        );
         return;
     }
     activate($mid, $used_secret, $appname);
 }
 
 sub remove_app {
-    my($message, $appname) = @_;
-    my $mid = $message->{content}{from};
+    my($receive, $appname) = @_;
+    my $mid = $receive->from_mid;
 
     my $activate_mid = get_activate_mid_by_mid_with_errorhandling($mid, $appname);
     return unless $activate_mid;
 
     remove_callback_url($activate_mid->{id});
     remove_activate_mid($activate_mid->{id});
-    send_text($mid, 'Succeed');
+    $bot->send_text( to_mid => $mid, text => 'Succeed' );
 }
 
 sub send_callback {
-    my($message, $appname, $text) = @_;
-    my $mid = $message->{content}{from};
+    my($receive, $appname, $text) = @_;
+    my $mid = $receive->from_mid;
 
     my $activate_mid = get_activate_mid_by_mid_with_errorhandling($mid, $appname);
     return unless $activate_mid;
 
     my $callback_url = get_callback_url($activate_mid->{id});
     unless ($callback_url) {
-        send_text($mid, "callback url is not found.\nPlease activatesave your apps's callback url on Web app.");
+        $bot->send_text(
+            to_mid => $mid,
+            text   => "callback url is not found.\nPlease activatesave your apps's callback url on Web app.",
+        );
         return;
     }
 
@@ -248,15 +233,21 @@ sub send_callback {
         message   => encode( utf8 => $text ),
     ]);
     if ($res->is_success) {
-        send_text($mid, sprintf("Succeed.\ncode: %s\nbody: %s", $res->code, $res->content));
+        $bot->send_text(
+            to_mid => $mid,
+            text   => sprintf("Succeed.\ncode: %s\nbody: %s", $res->code, $res->content),
+        );
     } else {
-        send_text($mid, sprintf("Failed.\ncode: %s\nbody: %s", $res->code, $res->content));
+        $bot->send_text(
+            to_mid => $mid,
+            text   => sprintf("Failed.\ncode: %s\nbody: %s", $res->code, $res->content),
+        );
     }
 }
 
 sub send_applist {
-    my($message) = @_;
-    my $mid = $message->{content}{from};
+    my($receive) = @_;
+    my $mid = $receive->from_mid;
 
     my $body = "Your registered app list.\n";
     my $rows = retrieve_ctivate_mids_by_mid($mid);
@@ -269,13 +260,12 @@ sub send_applist {
         $body .= "Your app is not registered.";
     }
 
-    send_text($mid, $body);
+    $bot->send_text( to_mid => $mid, text => $body );
 }
 
 sub send_help {
-    my($message) = @_;
-    my $mid = $message->{content}{from};
-    send_text($mid, <<'HELP');
+    my($receive) = @_;
+    $bot->send_text( to_mid => $receive->from_mid, text => <<'HELP' );
 ln.yappo Help
 
 1. add
@@ -301,7 +291,10 @@ sub get_activate_mid_by_mid_with_errorhandling {
 
     my $activate_mid = get_activate_mid_by_mid($mid, $appname);
     unless ($activate_mid) {
-        send_text($mid, "activate data is not found.\nPlease activate your apps.");
+        $bot->send_text(
+            to_mid => $mid,
+            text   => "activate data is not found.\nPlease activate your apps.",
+        );
         return;
     }
 }
@@ -342,11 +335,14 @@ sub activate {
             $mid, $used_secret, $api_app, $api_token, time()
         );
 
-        send_text($mid, "Congratulation! Your '$api_app' app's api_token is '$api_token'.");
+        $bot->send_text(
+            to_mid => $mid,
+            text   => "Congratulation! Your '$api_app' app's api_token is '$api_token'.",
+        );
         return;
     }
 
-    send_text($mid, 'Faild to registration.');
+    $bot->send_text( to_mid => $mid, text => 'Faild to registration.' );
 }
 
 sub remove_activate_mid {
@@ -369,30 +365,6 @@ sub save_callback_url {
 sub remove_callback_url {
     my($activate_mid_id) = @_;
     $dbh->do('DELETE FROM callback_url WHERE activate_mid_id=?', undef, $activate_mid_id);
-}
-
-sub send_text {
-    my($mid, $text) = @_;
-
-    my $json = +{
-        to        => [ $mid ],
-        toChannel => 1383378250,
-        eventType => 138311608800106203,
-        content   => +{
-            contentType => 1,
-            toType      => 1,
-            text        => $text,
-        },
-    };
-
-    my $res = $furl->post($line_bot_api_endpoint, [
-        'Content-Type'                 => 'application/json; charset=UTF-8',
-        'X-Line-ChannelID'             => $channel_id,
-        'X-Line-ChannelSecret'         => $channel_secret,
-        'X-Line-Trusted-User-With-ACL' => $bot_mid,
-    ], encode_json($json));
-
-    $res;
 }
 
 __END__
