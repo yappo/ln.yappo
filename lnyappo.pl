@@ -411,8 +411,8 @@ for SQLite
 $ sqlite3 lnyappo.db
 CREATE TABLE activate_mid (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  mid         TEXT NOT NULL UNIQUE,
-  used_secret TEXT NOT NULL UNIQUE,
+  mid         TEXT NOT NULL,
+  used_secret TEXT NOT NULL,
   api_app     TEXT NOT NULL,
   api_token   TEXT NOT NULL,
   created_at  INTEGER,
