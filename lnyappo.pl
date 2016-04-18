@@ -124,8 +124,8 @@ sub do_send {
         to_mid => $activate_mid->{mid},
         text   => decode( utf8 => "from: $appname\n$message" ),
     );
-    $res->header( 'Content-Type' => 'text/plain' );
-    $res->body(json_encode($line_res));
+    $res->header( 'Content-Type' => 'application/json' );
+    $res->body(encode_json(+{ %{ $line_res } }));
 }
 
 sub do_add_callback {
