@@ -124,7 +124,7 @@ sub do_send {
         to_mid => $activate_mid->{mid},
         text   => decode( utf8 => "from: $appname\n$message" ),
     );
-    $res->header( 'Content-Type' => $line_res->header('Content-Type') );
+    $res->header( 'Content-Type' => 'text/plain' );
     $res->body(json_encode($line_res));
 }
 
@@ -151,7 +151,7 @@ sub do_add_callback {
         to_mid => $activate_mid->{mid},
         text   => sprintf("'%s' app's callback url was registered by Web app.\nurl is '%s'", $appname, $url),
     );
-    $res->header( 'Content-Type' => $line_res->header('Content-Type') );
+    $res->header( 'Content-Type' => 'application/json' );
     $res->body('{"status":200,"message":"Succeed."}');
 }
 
